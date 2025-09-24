@@ -125,6 +125,7 @@ class Compiler(StateTrackingVisitor):
     """
 
     MAIN_BUFFER_ID: ClassVar[str] = "%main%"
+    VIA_BUFFER_ID: ClassVar[str] = "%vias%"  # Add a name for our via buffer
 
     def __init__(
         self, *, ignore_program_stop: bool = False, include_metadata: bool = False
@@ -134,7 +135,23 @@ class Compiler(StateTrackingVisitor):
         self._buffers: dict[str, CommandBuffer] = {}
         self._buffer_stack: list[str] = []
         self._contour_buffer: Optional[list[ShapeSegment]] = []
+        self._via_aperture_ids: set[str] = set()  # This will store our "via cookie cutters"
         self._create_main_buffer()
+        self._create_via_buffer() # Initialize the via buffer
+
+    def _create_via_buffer(self) -> CommandBuffer:
+        """Create a separate buffer for via pads."""
+        buffer = CommandBuffer(
+            self.VIA_BUFFER_ID,
+            box=None,
+            origin=Vector(x=0, y=0),
+            commands=[],
+            depends_on=set(),
+            resolved_dependencies=[],
+        )
+        assert self.VIA_BUFFER_ID not in self._buffers
+        self._set_buffer(buffer)
+        return buffer
 
     def _set_buffer(self, buffer: CommandBuffer) -> None:
         """Register buffer."""
@@ -260,9 +277,25 @@ class Compiler(StateTrackingVisitor):
 
     def on_adc(self, node: ADC) -> ADC:
         """Handle `AD` circle node."""
+        from pygerber.gerber.ast.nodes.enums import AperFunction  # Local import
+
         self.on_ad(node)
         aperture_buffer = self._create_aperture_buffer(node.aperture_id)
         metadata = self._get_aperture_metadata()
+
+        # --- vvv THIS IS OUR "TAGGING" LOGIC vvv ---
+        aper_function_attr = self.state.attributes.aperture_attributes.get(".AperFunction")
+        if (
+            aper_function_attr
+            and hasattr(aper_function_attr, 'function')
+            and aper_function_attr.function == AperFunction.ViaPad
+        ):
+            # If the attribute exists and is 'ViaPad', add this aperture's ID
+            # to our special list for later checking.
+            self._via_aperture_ids.add(node.aperture_id)
+            # vvv ADD THIS LINE vvv
+            print(f"DEBUG: Tagged {node.aperture_id} as a VIA aperture.")
+        # --- ^^^ END OF "TAGGING" LOGIC ^^^ ---
 
         aperture_buffer.append_shape(
             Shape.new_circle(
@@ -641,17 +674,29 @@ class Compiler(StateTrackingVisitor):
 
     def _on_flash_aperture(self, aperture_id: ApertureIdStr) -> None:
         metadata = self._get_object_metadata()
-
         buffer = self._get_aperture_buffer(aperture_id)
 
-        self._append_paste_to_current_buffer(
-            PasteLayer(
-                source_layer_id=buffer.layer_id,
-                center=Vector(x=self.coordinate_x, y=self.coordinate_y),
-                is_negative=self.is_negative,
-                metadata=metadata,
-            ),
+        # Create the low-level paste command.
+        paste_command = PasteLayer(
+            source_layer_id=buffer.layer_id,
+            center=Vector(x=self.coordinate_x, y=self.coordinate_y),
+            is_negative=self.is_negative,
+            metadata=metadata,
         )
+
+        # --- vvv THIS IS OUR "DIVERTING" LOGIC vvv ---
+        if aperture_id in self._via_aperture_ids:
+            # If the aperture being flashed is in our special list,
+            # send the command to the via buffer.
+            print(f"DEBUG: Diverting flash of {aperture_id} to VIA buffer.")
+            via_buffer = self._get_buffer(self.VIA_BUFFER_ID)
+            via_buffer.append_paste(paste_command)
+        else:
+            # Otherwise, send it to the normal current buffer.
+            print(f"DEBUG: Sending flash of {aperture_id} to MAIN buffer.")
+            self._append_paste_to_current_buffer(paste_command)
+            self._get_current_buffer().depends_on.add(aperture_id)
+        # --- ^^^ END OF "DIVERTING" LOGIC ^^^ ---
 
     def _get_aperture_buffer(self, aperture_id: str) -> CommandBuffer:
         transform = self.state.transform
@@ -797,23 +842,96 @@ class Compiler(StateTrackingVisitor):
             )
         return None
 
-    def _convert_buffers_to_rvmc(self) -> RVMC:
+    def _convert_buffers_to_rvmc(self, root_buffer_id: str) -> RVMC:
+        """Converts a set of dependent buffers into a single RVMC instruction set."""
         commands: list[Command] = []
-        buffer_submit_order = self._resolve_buffer_submit_order()
+        
+        # This list will hold the correct, dependency-resolved order of buffers to process.
+        buffer_submit_order: list[str] = []
+        # This set prevents us from processing the same buffer twice in case of complex dependencies.
+        processed_buffers = set()
 
-        for buffer in buffer_submit_order:
+        def resolve_dependencies(buffer_id: str):
+            """A helper function to walk the dependency tree."""
+            # If we've already handled this buffer, we're done.
+            if buffer_id in processed_buffers:
+                return
+            
+            buffer = self._get_buffer(buffer_id)
+            
+            # FIRST, recursively resolve all of this buffer's dependencies.
+            for dep_id in buffer.depends_on:
+                if dep_id not in processed_buffers:
+                    resolve_dependencies(dep_id)
+            
+            # THEN, add this buffer to the list.
+            # This ensures definitions (like D10) come before their uses (in %main%).
+            buffer_submit_order.append(buffer_id)
+            processed_buffers.add(buffer_id)
+
+        # Start the dependency resolution from our root buffer (e.g., %main% or %vias%).
+        if root_buffer_id in self._buffers:
+            resolve_dependencies(root_buffer_id)
+
+        # Now, iterate through the correctly ordered list and build the final command set.
+        for buffer_id in buffer_submit_order:
+            print(f"DEBUG-COMPILER: Packaging buffer '{buffer_id}' into the RVMC.")
+            buffer = self._get_buffer(buffer_id)
             commands.append(StartLayer(id=LayerID(id=buffer.id_str), box=buffer.box))
             commands.extend(buffer.commands)
             commands.append(EndLayer())
 
         return RVMC(commands=commands, metadata=self._get_file_metadata())
 
-    def compile(self, ast: File) -> RVMC:
-        """Compile Gerber AST to RVMC."""
+    # --- REPLACE the compile method at the end of compiler.py with this ---
+
+    def compile(self, ast: File) -> tuple[RVMC, RVMC]:
+        """Compile Gerber AST to RVMC, returning a tuple of (main_rvmc, via_rvmc)."""
+        print("\n--- PYGER-DEBUG: Final Dependency State ---")
+        print("Dumping all known buffers and their registered dependencies before final packaging:")
+        for buffer_id, buffer_obj in self._buffers.items():
+            dependencies = buffer_obj.depends_on if buffer_obj.depends_on else "None"
+            print(f"  - Buffer '{buffer_id}' depends on: {dependencies}")
+        print("--- END PYGER-DEBUG ---\n")
         ast.visit(self)
 
-        return self._convert_buffers_to_rvmc()
+        # 1. First, create the RVMC for the main layer as before.
+        main_rvmc = self._convert_buffers_to_rvmc(self.MAIN_BUFFER_ID)
 
+        # 2. Now, build a fully self-contained RVMC for the vias.
+        via_buffer = self._get_buffer(self.VIA_BUFFER_ID)
+        via_commands: list[Command] = []
+
+        if via_buffer.commands:
+            # --- THIS IS THE NEW LOGIC ---
+            # Find all unique aperture definitions that our via paste commands depend on.
+            needed_aperture_ids = {
+                cmd.source_layer_id.id
+                for cmd in via_buffer.commands
+                if isinstance(cmd, PasteLayer)
+            }
+
+            # For each needed aperture, get its full definition (the "cookie cutter")
+            # from the main buffer dictionary and add it to our via command list.
+            for aperture_id in needed_aperture_ids:
+                if aperture_id in self._buffers:
+                    aperture_definition_buffer = self._get_buffer(aperture_id)
+                    
+                    # We need to add the full Start -> Commands -> End sequence for the definition.
+                    via_commands.append(StartLayer(id=aperture_definition_buffer.layer_id, box=aperture_definition_buffer.box))
+                    via_commands.extend(aperture_definition_buffer.commands)
+                    via_commands.append(EndLayer())
+            # --- END OF NEW LOGIC ---
+
+            # Now, add the actual via paste commands.
+            via_commands.append(StartLayer(id=via_buffer.layer_id, box=via_buffer.box))
+            via_commands.extend(via_buffer.commands)
+            via_commands.append(EndLayer())
+
+        via_rvmc = RVMC(commands=via_commands, metadata=self._get_file_metadata())
+
+        # 3. Return both RVMC objects.
+        return main_rvmc, via_rvmc
 
 class MacroEvalVisitor(AstVisitor):
     """Visitor for evaluating macro primitives."""

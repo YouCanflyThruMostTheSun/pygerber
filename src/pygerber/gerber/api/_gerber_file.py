@@ -580,11 +580,28 @@ class GerberFile:
         assert self._cached_ast is not None
         return self._cached_ast
 
+    def _compile_and_get_rvmcs(self) -> tuple[RVMC, RVMC]:
+        """
+        A new internal method that returns both main and via instruction sets.
+        This is the new, powerful API for smart consumers like CompositeView.
+        """
+        ast = self._get_ast()
+        # Always run a fresh compile to get both parts.
+        # We do not cache this result as it's for a specific, complex use case.
+        main_rvmc, via_rvmc = compile(ast, **self._compiler_options)
+        return main_rvmc, via_rvmc
+    
     def _get_rvmc(self) -> RVMC:
+        """
+        The legacy method for getting a single RVMC. It calls the new compiler
+        but discards the via information to maintain backward compatibility.
+        """
         ast = self._get_ast()
 
         if self._cached_rvmc is None:
-            self._cached_rvmc = compile(ast, **self._compiler_options)
+            # We call the full compile but only keep the first part.
+            main_rvmc, _ = compile(ast, **self._compiler_options)
+            self._cached_rvmc = main_rvmc
 
         assert self._cached_rvmc is not None
         return self._cached_rvmc

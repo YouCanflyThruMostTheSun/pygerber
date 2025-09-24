@@ -117,7 +117,7 @@ Style.presets.PASTE_MASK = Style(
 )
 Style.presets.PASTE_MASK_ALPHA = Style(
     background=Color.from_rgba(0, 0, 0, 0),
-    foreground=Color.from_rgba(117, 117, 117, 255),
+    foreground=Color.from_rgba(204, 153, 51, 255),
 )
 
 Style.presets.SOLDER_MASK = Style(
@@ -126,7 +126,7 @@ Style.presets.SOLDER_MASK = Style(
 )
 Style.presets.SOLDER_MASK_ALPHA = Style(
     background=Color.from_rgba(0, 0, 0, 0),
-    foreground=Color.from_rgba(153, 153, 153, 255),
+    foreground=Color.from_rgba(204, 153, 51, 255),
 )
 
 Style.presets.DEFAULT_GRAYSCALE = Style(
@@ -150,4 +150,8 @@ Style.presets.BLACK_WHITE = Style(
 Style.presets.BLACK_WHITE_ALPHA = Style(
     background=Color.from_rgba(0, 0, 0, 0),
     foreground=Color.from_rgba(255, 255, 255, 255),
+)
+Style.presets.VIA_ALPHA = Style(
+    background=Color.from_rgba(0, 0, 0, 0),      # Transparent background
+    foreground=Color.from_rgba(220, 220, 220, 255),
 )

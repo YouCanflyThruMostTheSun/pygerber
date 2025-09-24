@@ -231,18 +231,29 @@ class PillowResult(Result):
         )
 
     def get_image(self, style: Style = Style.presets.COPPER_ALPHA) -> Image.Image:
-        """Get image with given color scheme."""
+        """Get image with given color scheme using a fast compositing method."""
         assert isinstance(style, Style)
         if self.image is None:
             msg = "Image is not available."
             raise ValueError(msg)
 
-        image = replace_color(
-            self.image, (255, 255, 255, 255), style.foreground.as_rgba_int()
+        # The original rendered image is black and white ('1' mode). This is our mask.
+        # We need to convert it to grayscale ('L') for the composite function.
+        mask = self.image.convert("L")
+
+        # Create a solid background layer.
+        background_img = Image.new(
+            "RGBA", self.image.size, style.background.as_rgba_int()
         )
-        return replace_color_in_place(
-            image, (0, 0, 0, 255), style.background.as_rgba_int()
+
+        # Create a solid foreground layer.
+        foreground_img = Image.new(
+            "RGBA", self.image.size, style.foreground.as_rgba_int()
         )
+
+        # Composite the foreground onto the background using the render as a mask.
+        # This is a single, highly optimized C operation that replaces the slow loops.
+        return Image.composite(foreground_img, background_img, mask)
 
     def get_image_no_style(self) -> Image.Image:
         """Get image without any color scheme."""
@@ -253,38 +264,6 @@ class PillowResult(Result):
         return self.image
 
 
-def replace_color(
-    input_image: Image.Image,
-    original: tuple[int, ...] | int,
-    replacement: tuple[int, ...] | int,
-    *,
-    output_image_mode: str = "RGBA",
-) -> Image.Image:
-    """Replace `original` color from input image with `replacement` color."""
-    if input_image.mode != output_image_mode:
-        output_image = input_image.convert(output_image_mode)
-    else:
-        output_image = input_image.copy()
-
-    replace_color_in_place(output_image, original, replacement)
-
-    return output_image
-
-
-def replace_color_in_place(
-    image: Image.Image,
-    original: tuple[int, ...] | int,
-    replacement: tuple[int, ...] | int,
-) -> Image.Image:
-    """Replace `original` color from input image with `replacement` color."""
-    for x in range(image.width):
-        for y in range(image.height):
-            if image.getpixel((x, y)) == original:
-                image.putpixel((x, y), replacement)
-
-    return image
-
-
 class PillowEagerLayer(EagerLayer):
     """`PillowEagerLayer` class represents drawing space of known fixed size.
 
@@ -293,6 +272,7 @@ class PillowEagerLayer(EagerLayer):
 
     def __init__(self, dpmm: int, layer_id: LayerID, box: Box, origin: Vector) -> None:
         super().__init__(layer_id, box, origin)
+        self.box = box # Keep this line from before
         self.origin = origin
         self.dpmm = dpmm
         self.pixel_size = (
@@ -301,6 +281,13 @@ class PillowEagerLayer(EagerLayer):
         )
         self.image = Image.new("1", self.pixel_size, 0)
         self.draw = ImageDraw.Draw(self.image)
+        
+        # --- NEW DEBUG LOGS START ---
+        print(f"DEBUG-LAYER-INIT: Layer '{layer_id.id}' created.")
+        print(f"    -> Box USED: {self.box}")
+        print(f"    -> Pixel Size: {self.pixel_size}")
+        print(f"    -> Final self.image.size: {self.image.size}")
+        # --- NEW DEBUG LOGS END ---
 
     def to_pixel(self, value: float) -> int:
         """Convert value in mm to pixels."""
@@ -327,10 +314,12 @@ class PillowVirtualMachine(VirtualMachine):
     """
 
     def __init__(
-        self, dpmm: int, *, fail_on_empty_auto_sized_layer: bool = False
+        self, dpmm: int, *, fail_on_empty_auto_sized_layer: bool = False, bounds_hint: Optional[Box] = None
     ) -> None:
         super().__init__(fail_on_empty_auto_sized_layer=fail_on_empty_auto_sized_layer)
         self.dpmm = dpmm
+        self._bounds_hint = bounds_hint
+        print(f"DEBUG: PillowVirtualMachine created with bounds_hint: {bounds_hint}")
         self.angle_length_to_segment_count = lambda angle_length: (
             int(segment_count)
             if (segment_count := angle_length * 2) > MIN_SEGMENT_COUNT
@@ -344,6 +333,21 @@ class PillowVirtualMachine(VirtualMachine):
 
     def create_eager_layer(self, layer_id: LayerID, origin: Vector, box: Box) -> Layer:
         """Create new eager layer instances (factory method)."""
+        
+        print(f"DEBUG: create_eager_layer called for {layer_id}")
+        print(f"       box: {box}")
+        print(f"       box.width: {box.width}, box.height: {box.height}")
+        print(f"       has bounds_hint: {hasattr(self, '_bounds_hint')}")
+        if hasattr(self, '_bounds_hint'):
+            print(f"       bounds_hint: {self._bounds_hint}")
+        
+        # Only use bounds_hint for main drawing layers, not aperture definition layers
+        is_main_layer = layer_id.id in ['%main%', '%vias%']
+        
+        if (hasattr(self, '_bounds_hint') and self._bounds_hint is not None and is_main_layer):
+            print(f"DEBUG: Using bounds_hint for main layer {layer_id}")
+            box = self._bounds_hint
+        
         assert box.width > 0
         assert box.height > 0
         return PillowEagerLayer(self.dpmm, layer_id, box, origin)
@@ -532,11 +536,45 @@ class PillowVirtualMachine(VirtualMachine):
         """Get color for positive or negative."""
         return 0 if is_negative else 1
 
+    # --- REPLACE the run method in PillowVirtualMachine with this ---
+
     def run(self, rvmc: RVMC) -> PillowResult:
         """Execute all commands."""
-        super().run(rvmc)
+        try:
+            super().run(rvmc)
+        except KeyError as e:
+            print("\n--- PYGER-DEBUG: FATAL KeyError CAUGHT! ---")
+            print(f"ERROR: The renderer tried to use a shape that was not defined in its current memory.")
+            print(f"MISSING SHAPE ID: {e}")
+            print("\n--- Current state of the renderer's memory (`self._layers`) ---")
+            if not self._layers:
+                print("  (Memory is completely empty)")
+            else:
+                for layer_id, layer_obj in self._layers.items():
+                    print(f"  - Known Shape ID: {layer_id}")
+            print("--- END PYGER-DEBUG ---\n")
+            raise e
 
         layer = self._layers.get(self.MAIN_LAYER_ID, None)
+        
+        if layer is None and self._layers:
+            print(f"DEBUG: No main layer found, searching for a drawing layer...")
+            
+            drawing_layer = None
+            # THIS IS THE FIX: Find a layer name that starts and ends with '%'.
+            for layer_obj in self._layers.values():
+                layer_name = layer_obj.layer_id.id
+                if layer_name.startswith('%') and layer_name.endswith('%'):
+                    drawing_layer = layer_obj
+                    break 
+            
+            if drawing_layer:
+                layer = drawing_layer
+                print(f"DEBUG: Found and am using drawing layer: '{layer.layer_id.id}'")
+            else: 
+                layer = next(iter(self._layers.values()))
+                print(f"DEBUG: No drawing layer found, using first available as fallback: '{layer.layer_id.id}'")
+
 
         if layer is None:
             if self._fail_on_empty_auto_sized_layer:
@@ -546,6 +584,13 @@ class PillowVirtualMachine(VirtualMachine):
             )
 
         assert isinstance(layer, PillowEagerLayer)
+        
+        print(f"DEBUG-VM-RUN: Preparing to return result for layer '{layer.layer_id.id}'.")
+        print(f"    -> Box state: {layer.box}")
+        print(f"    -> Image state: {layer.image.size}")
+        
+        final_box = self._bounds_hint if (self._bounds_hint is not None) else layer.box
+        
         return PillowResult(
-            layer.box, layer.image.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+            final_box, layer.image.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
         )

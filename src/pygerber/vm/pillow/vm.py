@@ -281,13 +281,7 @@ class PillowEagerLayer(EagerLayer):
         )
         self.image = Image.new("1", self.pixel_size, 0)
         self.draw = ImageDraw.Draw(self.image)
-        
-        # --- NEW DEBUG LOGS START ---
-        print(f"DEBUG-LAYER-INIT: Layer '{layer_id.id}' created.")
-        print(f"    -> Box USED: {self.box}")
-        print(f"    -> Pixel Size: {self.pixel_size}")
-        print(f"    -> Final self.image.size: {self.image.size}")
-        # --- NEW DEBUG LOGS END ---
+
 
     def to_pixel(self, value: float) -> int:
         """Convert value in mm to pixels."""
@@ -319,7 +313,6 @@ class PillowVirtualMachine(VirtualMachine):
         super().__init__(fail_on_empty_auto_sized_layer=fail_on_empty_auto_sized_layer)
         self.dpmm = dpmm
         self._bounds_hint = bounds_hint
-        print(f"DEBUG: PillowVirtualMachine created with bounds_hint: {bounds_hint}")
         self.angle_length_to_segment_count = lambda angle_length: (
             int(segment_count)
             if (segment_count := angle_length * 2) > MIN_SEGMENT_COUNT
@@ -334,18 +327,10 @@ class PillowVirtualMachine(VirtualMachine):
     def create_eager_layer(self, layer_id: LayerID, origin: Vector, box: Box) -> Layer:
         """Create new eager layer instances (factory method)."""
         
-        print(f"DEBUG: create_eager_layer called for {layer_id}")
-        print(f"       box: {box}")
-        print(f"       box.width: {box.width}, box.height: {box.height}")
-        print(f"       has bounds_hint: {hasattr(self, '_bounds_hint')}")
-        if hasattr(self, '_bounds_hint'):
-            print(f"       bounds_hint: {self._bounds_hint}")
-        
         # Only use bounds_hint for main drawing layers, not aperture definition layers
         is_main_layer = layer_id.id in ['%main%', '%vias%']
         
         if (hasattr(self, '_bounds_hint') and self._bounds_hint is not None and is_main_layer):
-            print(f"DEBUG: Using bounds_hint for main layer {layer_id}")
             box = self._bounds_hint
         
         assert box.width > 0
@@ -558,7 +543,6 @@ class PillowVirtualMachine(VirtualMachine):
         layer = self._layers.get(self.MAIN_LAYER_ID, None)
         
         if layer is None and self._layers:
-            print(f"DEBUG: No main layer found, searching for a drawing layer...")
             
             drawing_layer = None
             # THIS IS THE FIX: Find a layer name that starts and ends with '%'.
@@ -570,10 +554,8 @@ class PillowVirtualMachine(VirtualMachine):
             
             if drawing_layer:
                 layer = drawing_layer
-                print(f"DEBUG: Found and am using drawing layer: '{layer.layer_id.id}'")
             else: 
                 layer = next(iter(self._layers.values()))
-                print(f"DEBUG: No drawing layer found, using first available as fallback: '{layer.layer_id.id}'")
 
 
         if layer is None:
@@ -584,10 +566,6 @@ class PillowVirtualMachine(VirtualMachine):
             )
 
         assert isinstance(layer, PillowEagerLayer)
-        
-        print(f"DEBUG-VM-RUN: Preparing to return result for layer '{layer.layer_id.id}'.")
-        print(f"    -> Box state: {layer.box}")
-        print(f"    -> Image state: {layer.image.size}")
         
         final_box = self._bounds_hint if (self._bounds_hint is not None) else layer.box
         

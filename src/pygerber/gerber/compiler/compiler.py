@@ -293,8 +293,7 @@ class Compiler(StateTrackingVisitor):
             # If the attribute exists and is 'ViaPad', add this aperture's ID
             # to our special list for later checking.
             self._via_aperture_ids.add(node.aperture_id)
-            # vvv ADD THIS LINE vvv
-            print(f"DEBUG: Tagged {node.aperture_id} as a VIA aperture.")
+
         # --- ^^^ END OF "TAGGING" LOGIC ^^^ ---
 
         aperture_buffer.append_shape(
@@ -688,12 +687,10 @@ class Compiler(StateTrackingVisitor):
         if aperture_id in self._via_aperture_ids:
             # If the aperture being flashed is in our special list,
             # send the command to the via buffer.
-            print(f"DEBUG: Diverting flash of {aperture_id} to VIA buffer.")
             via_buffer = self._get_buffer(self.VIA_BUFFER_ID)
             via_buffer.append_paste(paste_command)
         else:
             # Otherwise, send it to the normal current buffer.
-            print(f"DEBUG: Sending flash of {aperture_id} to MAIN buffer.")
             self._append_paste_to_current_buffer(paste_command)
             self._get_current_buffer().depends_on.add(aperture_id)
         # --- ^^^ END OF "DIVERTING" LOGIC ^^^ ---
@@ -875,7 +872,6 @@ class Compiler(StateTrackingVisitor):
 
         # Now, iterate through the correctly ordered list and build the final command set.
         for buffer_id in buffer_submit_order:
-            print(f"DEBUG-COMPILER: Packaging buffer '{buffer_id}' into the RVMC.")
             buffer = self._get_buffer(buffer_id)
             commands.append(StartLayer(id=LayerID(id=buffer.id_str), box=buffer.box))
             commands.extend(buffer.commands)
@@ -887,12 +883,8 @@ class Compiler(StateTrackingVisitor):
 
     def compile(self, ast: File) -> tuple[RVMC, RVMC]:
         """Compile Gerber AST to RVMC, returning a tuple of (main_rvmc, via_rvmc)."""
-        print("\n--- PYGER-DEBUG: Final Dependency State ---")
-        print("Dumping all known buffers and their registered dependencies before final packaging:")
         for buffer_id, buffer_obj in self._buffers.items():
             dependencies = buffer_obj.depends_on if buffer_obj.depends_on else "None"
-            print(f"  - Buffer '{buffer_id}' depends on: {dependencies}")
-        print("--- END PYGER-DEBUG ---\n")
         ast.visit(self)
 
         # 1. First, create the RVMC for the main layer as before.

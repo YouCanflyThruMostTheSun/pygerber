@@ -65,13 +65,12 @@ class CompositeView:
         self,
         dpmm: int = 20,
     ) -> CompositePillowImage:
-        """Render project to raster image using Pillow with via separation and full debugging."""
+        """Render project to raster image using Pillow with via separation."""
         
         if not self.files:
             return CompositePillowImage([], Image.new("RGBA", (1, 1), (0, 0, 0, 0)))
 
         # STEP 1: Render all files normally first for bounding box calculation
-        # This ensures alignment works exactly like before
         reference_images: list[PillowImage] = []
         for i, file in enumerate(self.files):
             ref_img = file.render_with_pillow(dpmm=dpmm)
@@ -134,23 +133,22 @@ class CompositeView:
                     if via_rvmc.commands:
                         via_result = render(via_rvmc, backend="pillow", dpmm=dpmm, bounds_hint=copper_result.main_box)
                         
-                        # UNIFIED BOUNDING BOX APPROACH - Try to apply styling with unified coordinate system
+                        # Apply styling with unified coordinate system
                         try:
                             via_style = Style.presets.VIA_ALPHA
                         except AttributeError:
                             via_style = Style.presets.PASTE_MASK_ALPHA
                         
-                        # Get via style
-                        ref_space = ref_image.get_image_space()
+                        # Get reference canvas size
                         canvas_size = ref_image.get_image().size
                         
                         # Create unified canvas for copper + vias
                         unified_img = Image.new("RGBA", canvas_size, (0, 0, 0, 0))
                         
-                        # Paste copper first (it already has the right size and position)
+                        # Paste copper first
                         unified_img.paste(copper_img, (0, 0), mask=copper_img.getchannel("A"))
                         
-                        # For vias: if the via result is too small, we need to handle the coordinate offset
+                        # Add vias if they rendered properly
                         via_img = via_result.get_image(style=via_style)
                         
                         if via_img.size != (1, 1):
@@ -159,7 +157,7 @@ class CompositeView:
                                 # Same size - direct composite
                                 unified_img.paste(via_img, (0, 0), mask=via_img.getchannel("A"))
                             else:
-                                # Different size - this shouldn't happen but handle it gracefully
+                                # Different size - handle gracefully
                                 unified_img.paste(via_img, (0, 0), mask=via_img.getchannel("A"))
                         
                         # Paste the unified image to final canvas
